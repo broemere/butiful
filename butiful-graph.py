@@ -50,6 +50,12 @@ from sklearn.neighbors import NearestNeighbors
 # PIXELS PER MM
 PPMM = 15.8
 
+# ZERO FORCE DATA? (using minimum value)
+ZERO_FORCE = True
+
+# ZERO STRESS DATA? (using first value)
+ZERO_STRESS = False
+
 # SHIFT number of pixels to shift the top window for the side view window
 SHIFT_X = 15
 SHIFT_Y = 270
@@ -215,18 +221,20 @@ def bad_thresh(binary):
         return False
 
 
-def threshold_top(top_roi):
+def threshold_optimizer(top_roi, side_roi):
     """Goal seeks the best threshold value via the most continuous length
 
     The length is measured as the maximum number of binary pixels in the x direction
     Length should change linear continuously, so the best threshold value is found by the value where
         the standard deviation of the derivative of length is minimized
 
-    Width is found as the average of the real pixels masked by the binary image as this was found to be most stable.
+    Width & thickness is found as the average sum of vertical binary pixels (zero sums excluded).
+
+    The threshold value for the top was not found to be suitable for the side view image so the side view is not optimized
 
     """
     errors = []  # Error for each threshold value = StDev(gradient(height))
-    for th in tqdm(THRESH_RANGE, desc="Thresholding top"):  # Check each thresh value
+    for th in tqdm(THRESH_RANGE, desc="Optimizing threshold"):  # Check each thresh value
         lengths = []
         bad = False
         for img in top_roi:  # Threshold each image in the video
@@ -242,9 +250,10 @@ def threshold_top(top_roi):
         errors.append(error)
 
     th_best = THRESH_RANGE[np.argmin(errors)]  # best thresh value is the one with min error
-    print(th_best, "is the best threshold value for the top")
+    print(th_best, "is the best threshold value")
 
     lengths = []
+    thicknesses = []
     widths = []
     for img in top_roi:
         binary = thresh_clean(img, th_best)
@@ -252,45 +261,18 @@ def threshold_top(top_roi):
         length = np.max(horz_sum)  # length is the max pixel row
         lengths.append(length)
 
-        mask = binary * (img / 255)
-        vert_sum = np.sum(mask, axis=0)  # Sum columns in y direction, use real pixels bc it's more stable
-        width = np.mean(vert_sum[vert_sum > 0])  # width is the mean non-zero pixels in the column
-        widths.append(width)
-
-    return th_best, lengths, widths
-
-
-def threshold_side(side_roi):
-    """Goal seeks the best threshold value via the most continuous thickness"""
-    errors = []  # Error for each threshold value = RMSE / slope of height
-    for th in tqdm(THRESH_RANGE, desc="Thresholding side"):  # Check each thresh value
-        thicknesses = []
-        bad = False
-        for img in side_roi:  # Threshold each image in the video
-            binary = thresh_clean(img, th)
-            vert_sum = np.sum(binary * (img / 255), axis=0)  # Sum columns in x direction  #CHANGED from 1 to 0
-            bad = bad_thresh(binary)
-            if not bad:
-                thickness = np.mean(vert_sum[vert_sum > 0])  # thickness is the total non-zero pixels in the column
-            else:
-                thickness = np.random.rand()*1000
-            thicknesses.append(thickness)
-        error = np.std(np.gradient(thicknesses))
-        if bad:
-            error = 10000
-        errors.append(error)
-
-    th_best = THRESH_RANGE[np.argmin(errors)]  # best thresh value is the one with min error
-    print(th_best, "is the best threshold value for the side")
-
-    thicknesses = []
-    for img in side_roi:
         binary = thresh_clean(img, th_best)
-        vert_sum = np.sum(binary * (img / 255), axis=0)  # Sum columns in x direction  #CHANGED from 1 to 0
-        thickness = np.mean(vert_sum[vert_sum > 0])  # height is the total non-zero pixels in the column
+        vert_sum = np.sum(binary, axis=0)  # Sum rows in y direction
+        thickness = np.mean(vert_sum[vert_sum > 0])  # width is the mean of non-zero pixel columns
         thicknesses.append(thickness)
 
-    return th_best, thicknesses
+    for img in side_roi:
+        binary = thresh_clean(img, th_best)
+        vert_sum = np.sum(binary, axis=0)
+        width = np.mean(vert_sum[vert_sum > 0])
+        widths.append(width)
+
+    return th_best, lengths, thicknesses, widths
 
 
 def display(img, gray=True):
@@ -341,12 +323,11 @@ popup_msg(message)
 
 top_roi, side_roi = roi(frames)
 
-th_best, lengths, widths = threshold_top(top_roi)
-th_best_side, thicknesses = threshold_side(side_roi)
+th_best, lengths, thicknesses, widths = threshold_optimizer(top_roi, side_roi)
 
 cs_area = np.multiply(thicknesses, widths)
 
-vid_frames = render_threshold_video(top_roi, side_roi, th_best, th_best_side)
+vid_frames = render_threshold_video(top_roi, side_roi, th_best, th_best)
 
 length_graph = plt.figure(dpi=FIG_DPI)
 plt.title(f"Length (th={th_best})")
@@ -356,19 +337,19 @@ plt.ylabel("Top Length [mm]")
 plt.tight_layout()
 plt.show()
 
-width_graph = plt.figure(dpi=FIG_DPI)
-plt.title(f"Width (th={th_best})")
-plt.scatter(np.arange(len(widths)), np.array(widths) / PPMM)
-plt.xlabel("Time")
-plt.ylabel("Top Width [mm]")
-plt.tight_layout()
-plt.show()
-
 thickness_graph = plt.figure(dpi=FIG_DPI)
 plt.title(f"Thickness (th={th_best})")
 plt.scatter(np.arange(len(thicknesses)), np.array(thicknesses) / PPMM)
 plt.xlabel("Time")
 plt.ylabel("Side Thickness [mm]")
+plt.tight_layout()
+plt.show()
+
+width_graph = plt.figure(dpi=FIG_DPI)
+plt.title(f"Width (th={th_best})")
+plt.scatter(np.arange(len(widths)), np.array(widths) / PPMM)
+plt.xlabel("Time")
+plt.ylabel("Top Width [mm]")
 plt.tight_layout()
 plt.show()
 
@@ -387,6 +368,8 @@ def load_force_data(csv_file):
     """Read Excel file and get column labeled 'Forces'"""
     df = pd.read_excel(csv_file)
     df = df.dropna()
+    if ZERO_FORCE:
+        df['Forces'] = df['Forces']-df['Forces'].min()
     force = df['Forces'].to_list()
     return force
 
@@ -458,7 +441,8 @@ def scale_and_smooth_data(x, y):
     x_smooth = scaler_x.inverse_transform(x_norm.reshape(-1, 1)).flatten()
     y_smooth = scaler_y.inverse_transform(y_norm.reshape(-1, 1)).flatten()
 
-    y_smooth = y_smooth - y_smooth[0]
+    if ZERO_STRESS:
+        y_smooth = y_smooth - y_smooth[0]
 
     return x_norm, y_norm, x_smooth, y_smooth  # Smoothed and normalized X and Y data, non-normalized X and Y
 
