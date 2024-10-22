@@ -382,6 +382,8 @@ def dynamic_weighted_average(x, y, density, scaling_factor=10.0):
     for i in range(len(x)):
         # Determine window size based on density
         window_size = int(density[i] * scaling_factor)  # Scale density for window size
+        if window_size == 0:
+            window_size = int(np.mean(density) * scaling_factor)
         left = max(0, i - window_size)
         right = min(len(x), i + window_size)
         window_x = x[left:right]
